@@ -25,16 +25,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      # Testing as Code : si un test unitaire échoue, le déploiement n'a pas lieu.
+      # Deux versions : 3.9 (ancienne version par défaut d'une web app PythonAnywhere) et 3.13 (cible de l'atelier).
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Unit tests (offline, Python 3.9)
+        shell: bash
+        run: |
+          pip install -q -r requirements.txt
+          python -m unittest discover -s tests_unit
+
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      # Testing as Code : si un test unitaire échoue, le déploiement n'a pas lieu.
-      - name: Unit tests (offline)
+      - name: Unit tests (offline, Python 3.13)
         shell: bash
         run: |
-          pip install -r requirements.txt
+          pip install -q -r requirements.txt
           python -m unittest discover -s tests_unit -v
 
       # 1) Présence et format des 4 secrets
@@ -136,7 +148,11 @@ jobs:
             echo "Attente du rechargement (${i}/12)…"; sleep 5
           done
           if [[ "${version}" != "${GITHUB_SHA}" ]]; then
-            echo "::error::/health ne renvoie pas la version déployée (${version:-aucune réponse}). Voir ${PA_WEBAPP_DOMAIN}.error.log"
+            echo "::error::/health ne renvoie pas la version déployée (${version:-aucune réponse})."
+            echo "----- fin du journal d'erreurs PythonAnywhere -----"
+            curl -sS -H "Authorization: Token ${PA_TOKEN}" \
+              "https://${PA_HOST}/api/v0/user/${PA_USERNAME}/files/path/var/log/${PA_WEBAPP_DOMAIN}.error.log" \
+              | tail -n 40 || true
             exit 1
           fi
           for path in / /dashboard /api/runs; do

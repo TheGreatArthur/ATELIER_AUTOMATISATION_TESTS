@@ -4,6 +4,8 @@ Uniquement la bibliothèque standard (urllib) : rien à installer sur PythonAnyw
 et le proxy des comptes gratuits (variables https_proxy) est pris en compte
 automatiquement par urllib.
 """
+from __future__ import annotations  # syntaxe "int | None" aussi sous Python 3.9
+
 import json
 import socket
 import time
