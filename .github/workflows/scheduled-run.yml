@@ -1,0 +1,39 @@
+name: Scheduled API test run
+
+# Planification complémentaire à la "Scheduled Task" PythonAnywhere
+# (limitée à 1 exécution/jour sur un compte gratuit) : GitHub appelle /run
+# toutes les 30 minutes. L'anti-spam de l'app (1 run / 60 s) reste actif.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Trigger /run on PythonAnywhere
+        shell: bash
+        env:
+          DOMAIN: ${{ secrets.PA_WEBAPP_DOMAIN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DOMAIN}" ]]; then
+            echo "Secret PA_WEBAPP_DOMAIN absent : rien à faire."
+            exit 0
+          fi
+          code=$(curl -sS -m 90 -o body.json -w "%{http_code}" -X POST \
+            "https://${DOMAIN}/run?trigger=github-actions")
+          echo "HTTP ${code}"
+          head -c 1500 body.json; echo
+          # 201 = run exécuté ; 429 = un run récent existe déjà (anti-spam) : les deux sont normaux
+          [[ "${code}" == "201" || "${code}" == "429" ]]
+
+      - name: Check /health
+        shell: bash
+        env:
+          DOMAIN: ${{ secrets.PA_WEBAPP_DOMAIN }}
+        run: |
+          [[ -z "${DOMAIN}" ]] && exit 0
+          curl -sS -m 30 --fail "https://${DOMAIN}/health"; echo

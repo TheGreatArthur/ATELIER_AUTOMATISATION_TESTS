@@ -13,6 +13,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Testing as Code : si un test unitaire échoue, le déploiement n'a pas lieu.
+      - name: Unit tests (offline)
+        shell: bash
+        run: |
+          pip install -r requirements.txt
+          python -m unittest discover -s tests_unit -v
+
       - name: Validate required secrets
         shell: bash
         run: |

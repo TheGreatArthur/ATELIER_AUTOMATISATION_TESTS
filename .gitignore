@@ -1,0 +1,8 @@
+# Base SQLite locale : ne JAMAIS la versionner, sinon le déploiement écraserait
+# l'historique stocké sur PythonAnywhere.
+*.db
+*.db-journal
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

@@ -74,3 +74,67 @@ Vos log sont accéssible via les URL suivantes :
 * Access log : {site}.pythonanywhere.com.access.log
 * Error log : {site}.pythonanywhere.com.error.log
 * Server log: {site}.pythonanywhere.com.server.log
+
+------------------------------------------------------------------------------------------------------
+✅ Réalisation : monitoring de l'API Open-Meteo
+------------------------------------------------------------------------------------------------------
+API testée : **[Open-Meteo](https://open-meteo.com/)** (sans clé, présente dans la whitelist PythonAnywhere). Fiche de choix et contrat : [API_CHOICE.md](API_CHOICE.md).
+
+**Routes de l'application Flask**
+
+| Route | Rôle |
+|-------|------|
+| `/` | Consignes de l'atelier |
+| `/run` (GET/POST) | Lance un run de tests, l'enregistre en SQLite et renvoie le JSON (201). Anti-spam : 429 + `Retry-After` si un run a eu lieu il y a moins de 60 s |
+| `/dashboard` | Dernier run (statut, KPIs, interprétation, détail des tests), tendances latence / taux d'erreur, historique cliquable (`?run=<id>`) |
+| `/health` | Santé de la solution : base SQLite joignable, âge et statut du dernier run (503 si la base est KO) |
+| `/api/runs`, `/api/runs/latest`, `/api/runs/<id>` | Historique et runs au format JSON |
+| `/export.json` | Export JSON téléchargeable de l'historique complet |
+
+**Structure**
+
+```
+flask_app.py          # routes Flask
+storage.py            # SQLite : save_run(), list_runs(), get_run(), get_last_run()
+scheduled_run.py      # point d'entrée de la tâche planifiée PythonAnywhere
+tester/
+├─ client.py          # wrapper HTTP : timeout 3 s, 1 retry max, 429/5xx, latence, quota 20 req/run
+├─ tests.py           # 10 tests "as code" (contrat, erreurs attendues, QoS)
+├─ metrics.py         # avg / p95 / dispo / taux d'erreur + interprétation
+└─ runner.py          # exécute les tests et construit le run
+templates/dashboard.html
+tests_unit/           # 20 tests unitaires hors-ligne (faux serveur HTTP local), lancés par la CI avant déploiement
+```
+
+**Plan de tests (10 tests, 12 requêtes par run)**
+
+| ID | Test | Catégorie |
+|----|------|-----------|
+| T01 | `GET /forecast` (current) → HTTP 200 + `Content-Type` JSON | Contrat |
+| T02 | Champs obligatoires présents (racine, `current`, `current_units`) | Contrat |
+| T03 | Types et plages (float/int/str ISO, température, humidité 0–100, unité °C, timezone) | Contrat |
+| T04 | `daily` sur 3 jours : longueurs, dates consécutives, max ≥ min | Contrat |
+| T05 | Géocodage « Paris » → `results[0]` = Paris, FR, coordonnées cohérentes | Contrat |
+| T06 | Géocodage d'un nom inconnu → 200 sans `results` | Erreurs attendues |
+| T07 | `latitude=999` → 400 + `{"error": true, "reason": ...}` | Erreurs attendues |
+| T08 | Variable inconnue → 400 + corps d'erreur | Erreurs attendues |
+| T09 | Endpoint inexistant → 404 | Erreurs attendues |
+| T10 | 5 appels : latence p95 < 1000 ms | QoS |
+
+**Robustesse** : timeout 3 s, 1 retry maximum sur timeout / erreur réseau / 429 / 5xx (jamais sur les 4xx attendus), attente `Retry-After` plafonnée à 5 s sur 429, backoff 0,5 s sur 5xx, plafond de 20 requêtes et 45 s par run. Un test qui plante est classé `ERROR` sans interrompre le run.
+
+**Indicateurs QoS** (par run) : latence moyenne / p95 / min / max, taux d'erreur = (FAIL + ERROR) / tests, disponibilité = requêtes ayant obtenu une réponse exploitable (hors 5xx, timeouts, erreurs réseau), nombre de retries / 429 / 5xx. Statut `UP` (tout passe), `DEGRADED` (au moins un échec), `DOWN` (rien ne passe ou dispo < 50 %). Le dashboard affiche une interprétation en clair.
+
+**Planification**
+
+* PythonAnywhere → onglet **Tasks** → commande : `python3.13 /home/<user>/<dossier>/scheduled_run.py` (quotidienne sur un compte gratuit, horaire sur un compte payant).
+* Complément : le workflow [`scheduled-run.yml`](.github/workflows/scheduled-run.yml) appelle `/run` toutes les 30 minutes via GitHub Actions (utilise le secret `PA_WEBAPP_DOMAIN`).
+
+**En local**
+
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests_unit -v   # tests unitaires hors-ligne
+python scheduled_run.py                         # un run réel contre l'API
+python flask_app.py                             # puis http://localhost:5000/dashboard
+```
