@@ -68,6 +68,57 @@ class AppTest(unittest.TestCase):
         health = self.client.get("/health").get_json()
         self.assertEqual(health["status"], "ok")
         self.assertEqual(health["checks"]["last_run"]["api_status"], "UP")
+        self.assertEqual(health["version"], flask_app.VERSION)
+
+    def test_period_filter(self):
+        old = storage.save_run(fake_run(), trigger="cron")
+        recent = storage.save_run(fake_run(), trigger="cron")
+        with storage._connect() as conn:  # vieillit artificiellement le premier run de 10 jours
+            conn.execute("UPDATE runs SET created_at = created_at - 10 * 86400 WHERE id = ?", (old,))
+
+        week = self.client.get("/api/runs?period=7d").get_json()
+        self.assertEqual([r["id"] for r in week["runs"]], [recent])
+        self.assertEqual(week["stats"]["runs"], 1)
+        self.assertEqual(self.client.get("/api/runs?period=all").get_json()["count"], 2)
+        self.assertEqual(self.client.get("/api/runs?period=nimporte").get_json()["period"], "7d")
+        self.assertEqual(len(self.client.get("/export.json?period=24h").get_json()["runs"]), 1)
+        page = self.client.get("/dashboard?period=30d")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b'aria-current="true">30 jours', page.data)
+
+    def test_security_and_cache_headers(self):
+        resp = self.client.get("/health")
+        self.assertEqual(resp.headers["Cache-Control"], "no-store")
+        self.assertEqual(resp.headers["X-Content-Type-Options"], "nosniff")
+        self.assertIn("Disallow: /run", self.client.get("/robots.txt").get_data(as_text=True))
+
+
+class RunSlotTest(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(storage.db_path()):
+            os.remove(storage.db_path())
+
+    def test_slot_is_exclusive_until_interval_elapsed(self):
+        self.assertEqual(storage.claim_run_slot(300), (True, 0.0))
+        allowed, wait = storage.claim_run_slot(300)
+        self.assertFalse(allowed)
+        self.assertGreater(wait, 290)
+        self.assertTrue(storage.claim_run_slot(0)[0])  # intervalle nul : toujours libre
+
+    def test_scheduled_run_pushes_back_manual_runs(self):
+        storage.init_db()
+        self.assertEqual(storage.seconds_until_next_run(300), 0)
+        storage.mark_run_slot()
+        self.assertGreater(storage.seconds_until_next_run(300), 290)
+        self.assertFalse(storage.claim_run_slot(300)[0])
+
+    def test_slot_initialised_from_existing_history(self):
+        # base d'une version précédente : des runs, mais pas encore de table run_slot
+        storage.save_run(fake_run())
+        with storage._connect() as conn:
+            conn.execute("DROP TABLE run_slot")
+        storage._initialized.clear()
+        self.assertGreater(storage.seconds_until_next_run(300), 290)  # créneau = dernier run
 
 
 if __name__ == "__main__":

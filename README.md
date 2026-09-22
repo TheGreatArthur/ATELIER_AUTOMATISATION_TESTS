@@ -78,32 +78,41 @@ Vos log sont accéssible via les URL suivantes :
 ------------------------------------------------------------------------------------------------------
 ✅ Réalisation : monitoring de l'API Open-Meteo
 ------------------------------------------------------------------------------------------------------
-API testée : **[Open-Meteo](https://open-meteo.com/)** (sans clé, présente dans la whitelist PythonAnywhere). Fiche de choix et contrat : [API_CHOICE.md](API_CHOICE.md).
+API testée : **[Open-Meteo](https://open-meteo.com/)** (sans clé, présente dans l'allowlist PythonAnywhere des comptes gratuits). Fiche de choix et contrat : [API_CHOICE.md](API_CHOICE.md). Données météo : Open-Meteo.com, licence [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) (attribution affichée sur le dashboard, comme l'exigent les [conditions d'utilisation](https://open-meteo.com/en/terms)).
 
 **Routes de l'application Flask**
 
 | Route | Rôle |
 |-------|------|
 | `/` | Consignes de l'atelier |
-| `/run` (GET/POST) | Lance un run de tests, l'enregistre en SQLite et renvoie le JSON (201). Anti-spam : 429 + `Retry-After` si un run a eu lieu il y a moins de 5 minutes |
-| `/dashboard` | Dernier run (statut, KPIs, interprétation, détail des tests), tendances latence / taux d'erreur, historique cliquable (`?run=<id>`) |
-| `/health` | Santé de la solution : base SQLite joignable, âge et statut du dernier run (503 si la base est KO) |
-| `/api/runs`, `/api/runs/latest`, `/api/runs/<id>` | Historique et runs au format JSON |
-| `/export.json` | Export JSON téléchargeable de l'historique complet |
+| `/run` (GET/POST) | Lance un run de tests, l'enregistre en SQLite et renvoie le JSON (201). Anti-spam : **1 run / 5 min**, sinon 429 + `Retry-After` |
+| `/dashboard` | Dernier run (statut, KPIs, interprétation, détail des tests), filtre de période, indicateurs agrégés, tendances latence / taux d'erreur, historique cliquable (`?run=<id>`) |
+| `/health` | Santé de la solution : base SQLite joignable, âge et statut du dernier run, **version déployée** (SHA du commit), délai avant le prochain run autorisé (503 si la base est KO) |
+| `/api/runs?period=24h\|7d\|30d\|all` | Historique + agrégats de la période en JSON |
+| `/api/runs/latest`, `/api/runs/<id>` | Un run complet en JSON |
+| `/export.json?period=…` | Export JSON téléchargeable (runs complets + agrégats) |
+| `/robots.txt` | Interdit l'indexation de `/run` et de l'API |
+
+**Outils du dashboard**
+
+* **Pastille « solution ok / degraded »** (lien vers `/health`) : âge du dernier run, alerte si aucun run depuis plus de 3 h (planification cassée), version en prod.
+* **Bouton « Lancer un run »** : désactivé avec compte à rebours tant que l'anti-spam bloque, au lieu de renvoyer une erreur.
+* **Filtre de période** (24 h / 7 jours / 30 jours / Tout) qui pilote les indicateurs agrégés (runs UP, disponibilité moyenne, taux d'erreur moyen, p95 moyen et pire p95), les graphiques, l'historique et l'export JSON.
+* **Graphiques** avec infobulle au survol (et au clavier sur la latence) ; un clic sur une barre ou une ligne d'historique ouvre le détail du run.
 
 **Structure**
 
 ```
-flask_app.py          # routes Flask
-storage.py            # SQLite : save_run(), list_runs(), get_run(), get_last_run()
-scheduled_run.py      # point d'entrée de la tâche planifiée PythonAnywhere
+flask_app.py          # routes Flask, en-têtes de sécurité / cache
+storage.py            # SQLite : runs, créneau anti-spam atomique, agrégats par période
+scheduled_run.py      # point d'entrée d'une tâche planifiée PythonAnywhere (comptes éligibles)
 tester/
-├─ client.py          # wrapper HTTP : timeout 3 s, 1 retry max, 429/5xx, latence, quota 20 req/run
+├─ client.py          # wrapper HTTP : timeout 3 s, 1 retry max, 429/5xx, latence, 20 req et 25 s max par run
 ├─ tests.py           # 10 tests "as code" (contrat, erreurs attendues, QoS)
 ├─ metrics.py         # avg / p95 / dispo / taux d'erreur + interprétation
 └─ runner.py          # exécute les tests et construit le run
 templates/dashboard.html
-tests_unit/           # 20 tests unitaires hors-ligne (faux serveur HTTP local), lancés par la CI avant déploiement
+tests_unit/           # 25 tests unitaires hors-ligne (faux serveur HTTP local), lancés par la CI avant déploiement
 ```
 
 **Plan de tests (10 tests, 12 requêtes par run)**
@@ -121,14 +130,50 @@ tests_unit/           # 20 tests unitaires hors-ligne (faux serveur HTTP local),
 | T09 | Endpoint inexistant → 404 | Erreurs attendues |
 | T10 | 5 appels : latence p95 < 1000 ms | QoS |
 
-**Robustesse** : timeout 3 s, 1 retry maximum sur timeout / erreur réseau / 429 / 5xx (jamais sur les 4xx attendus), attente `Retry-After` plafonnée à 5 s sur 429, backoff 0,5 s sur 5xx, plafond de 20 requêtes et 45 s par run. Un test qui plante est classé `ERROR` sans interrompre le run.
+**Robustesse** : timeout 3 s, 1 retry maximum sur timeout / erreur réseau / 429 / 5xx (jamais sur les 4xx attendus), attente `Retry-After` plafonnée à 5 s sur 429, backoff 0,5 s sur 5xx, plafond de 20 requêtes et 25 s par run (un compte gratuit n'a qu'un seul worker web : un run ne doit pas bloquer le site). Un test qui plante est classé `ERROR` sans interrompre le run. L'anti-spam repose sur un UPDATE conditionnel SQLite : fiable même avec plusieurs workers.
 
-**Indicateurs QoS** (par run) : latence moyenne / p95 / min / max, taux d'erreur = (FAIL + ERROR) / tests, disponibilité = requêtes ayant obtenu une réponse exploitable (hors 5xx, timeouts, erreurs réseau), nombre de retries / 429 / 5xx. Statut `UP` (tout passe), `DEGRADED` (au moins un échec), `DOWN` (rien ne passe ou dispo < 50 %). Le dashboard affiche une interprétation en clair.
+**Indicateurs QoS** (par run) : latence moyenne / p95 / min / max, taux d'erreur = (FAIL + ERROR) / tests, disponibilité = requêtes ayant obtenu une réponse exploitable (hors 5xx, timeouts, erreurs réseau), nombre de retries / 429 / 5xx. Statut `UP` (tout passe), `DEGRADED` (au moins un échec), `DOWN` (rien ne passe ou dispo < 50 %). Le dashboard affiche une interprétation en clair, et les mêmes indicateurs agrégés sur la période choisie.
+
+---------------------------------------------------
+🚀 Mise en production
+---------------------------------------------------
+
+**Les 4 secrets** (Settings → Secrets and variables → Actions) :
+
+| Secret | Format attendu | Exemple |
+|--------|----------------|---------|
+| `PA_USERNAME` | nom d'utilisateur PythonAnywhere | `monuser` |
+| `PA_TOKEN` | Account → API Token | *(ne jamais le committer)* |
+| `PA_TARGET_DIR` | onglet Web → *Source code*, chemin absolu sans `/` final | `/home/monuser/mysite` |
+| `PA_WEBAPP_DOMAIN` | domaine seul, sans `https://` ni `/` | `monuser.pythonanywhere.com` |
+| `PA_HOST` *(optionnel)* | uniquement pour un compte EU | `eu.pythonanywhere.com` |
+
+**Ce que fait le workflow de déploiement** ([deploy-pythonanywhere.yml](.github/workflows/deploy-pythonanywhere.yml)) à chaque push sur `main` :
+
+1. **Tests unitaires** hors-ligne : un échec bloque le déploiement.
+2. **Validation des secrets** : présence et format des 4 secrets, message explicite pour chaque erreur.
+3. **Vérification réelle via l'API PythonAnywhere** (`GET /api/v0/user/<user>/webapps/<domaine>/`) : token et username valides (sinon 401), web app existante (sinon 404), `PA_TARGET_DIR` identique au *Source code* de la web app, Python 3.13.
+4. **Upload des seuls fichiers d'exécution** (code Python hors tests + templates + `VERSION`), avec retry : l'API PythonAnywhere est limitée à 40 requêtes/min. `runs.db` n'est jamais envoyé, l'historique de prod est conservé.
+5. **Reload** de la web app.
+6. **Smoke test de la prod** : `/health` doit renvoyer le SHA du commit déployé, `/`, `/dashboard` et `/api/runs` doivent répondre 200, puis un vrai `POST /run` vérifie que les requêtes sortantes vers Open-Meteo passent le proxy PythonAnywhere.
 
 **Planification**
 
-* PythonAnywhere → onglet **Tasks** → commande : `python3.13 /home/<user>/<dossier>/scheduled_run.py` (quotidienne sur un compte gratuit, horaire sur un compte payant).
-* Complément : le workflow [`scheduled-run.yml`](.github/workflows/scheduled-run.yml) appelle `/run` toutes les 30 minutes via GitHub Actions (utilise le secret `PA_WEBAPP_DOMAIN`).
+* Les comptes gratuits **créés après le 15/01/2026** (08/01/2026 sur le serveur EU) n'ont **pas de tâche planifiée** ([doc PythonAnywhere](https://help.pythonanywhere.com/pages/FreeAccountsFeatures)). La planification principale est donc le workflow [`scheduled-run.yml`](.github/workflows/scheduled-run.yml), qui appelle `POST /run` **toutes les 30 minutes** puis contrôle `/health`.
+* Compte payant ou compte gratuit plus ancien : onglet **Tasks** → `python3.13 /home/<user>/mysite/scheduled_run.py` (1 fois par jour en gratuit). Ces runs passent toujours et repoussent le prochain run manuel.
+
+**Limites d'un compte gratuit récent** : 1 web app, 1 worker web, et la web app **expire au bout d'1 mois** : cliquer sur *« Run until 1 month from today »* dans l'onglet Web pour la prolonger. Si le site s'arrête, le workflow planifié échoue et GitHub le signale (onglet Actions, et e-mail selon tes réglages de notifications).
+
+**Dépannage**
+
+| Symptôme dans GitHub Actions | Cause probable |
+|---|---|
+| `PA_… manquant` / format invalide | secret absent ou mal saisi (voir tableau ci-dessus) |
+| `Token refusé (HTTP 401)` | token révoqué ou erroné, mauvais `PA_USERNAME`, ou compte EU sans `PA_HOST` |
+| `Web app … introuvable (HTTP 404)` | web app non créée ou `PA_WEBAPP_DOMAIN` erroné |
+| `PA_TARGET_DIR différent du 'Source code'` | le code serait déposé dans un dossier que le site ne charge pas |
+| `/health ne renvoie pas la version déployée` | erreur au démarrage : consulter `<site>.pythonanywhere.com.error.log` |
+| `Aucune requête sortante n'aboutit` | domaine absent de l'allowlist / proxy PythonAnywhere |
 
 **En local**
 
@@ -136,5 +181,5 @@ tests_unit/           # 20 tests unitaires hors-ligne (faux serveur HTTP local),
 pip install -r requirements.txt
 python -m unittest discover -s tests_unit -v   # tests unitaires hors-ligne
 python scheduled_run.py                         # un run réel contre l'API
-python flask_app.py                             # puis http://localhost:5000/dashboard
+python flask_app.py                             # puis http://localhost:5000/dashboard (PORT=… pour changer)
 ```

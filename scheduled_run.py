@@ -15,6 +15,7 @@ from tester.runner import run_all  # noqa: E402
 def main():
     run = run_all()
     run_id = storage.save_run(run, trigger="scheduled-task")
+    storage.mark_run_slot()  # repousse le prochain run manuel (anti-spam)
     s = run["summary"]
     print(f"[{run['timestamp']}] run #{run_id} {s['status']} — {s['passed']}/{s['total']} PASS, "
           f"erreur {s['error_rate'] * 100:.1f} %, dispo {s['availability'] * 100:.0f} %, "

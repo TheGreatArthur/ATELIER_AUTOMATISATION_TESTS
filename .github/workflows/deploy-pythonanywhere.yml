@@ -5,9 +5,21 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-pythonanywhere
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PA_USERNAME: ${{ secrets.PA_USERNAME }}
+      PA_TOKEN: ${{ secrets.PA_TOKEN }}
+      PA_TARGET_DIR: ${{ secrets.PA_TARGET_DIR }}
+      PA_WEBAPP_DOMAIN: ${{ secrets.PA_WEBAPP_DOMAIN }}
+      # Optionnel : secret PA_HOST = "eu.pythonanywhere.com" pour un compte EU.
+      PA_HOST: ${{ secrets.PA_HOST }}
 
     steps:
       - name: Checkout
@@ -25,72 +37,127 @@ jobs:
           pip install -r requirements.txt
           python -m unittest discover -s tests_unit -v
 
+      # 1) Présence et format des 4 secrets
       - name: Validate required secrets
         shell: bash
-        env:
-          PA_USERNAME: ${{ secrets.PA_USERNAME }}
-          PA_TOKEN: ${{ secrets.PA_TOKEN }}
-          PA_TARGET_DIR: ${{ secrets.PA_TARGET_DIR }}
-          PA_WEBAPP_DOMAIN: ${{ secrets.PA_WEBAPP_DOMAIN }}
         run: |
           set -euo pipefail
-          missing=()
+          errors=()
           for name in PA_USERNAME PA_TOKEN PA_TARGET_DIR PA_WEBAPP_DOMAIN; do
-            [[ -n "${!name}" ]] || missing+=("$name")
+            [[ -n "${!name}" ]] || errors+=("$name manquant")
           done
-          if (( ${#missing[@]} )); then
-            echo "::error::Secrets manquants : ${missing[*]} (Settings → Secrets and variables → Actions)"
+          if [[ -n "${PA_WEBAPP_DOMAIN}" && ! "${PA_WEBAPP_DOMAIN}" =~ ^[a-z0-9.-]+\.pythonanywhere\.com$ ]]; then
+            errors+=("PA_WEBAPP_DOMAIN doit ressembler à monuser.pythonanywhere.com (sans https:// ni /)")
+          fi
+          if [[ -n "${PA_TARGET_DIR}" && ! "${PA_TARGET_DIR}" =~ ^/home/[^/]+/.*[^/]$ ]]; then
+            errors+=("PA_TARGET_DIR doit être un chemin absolu /home/<user>/<dossier>, sans / final")
+          fi
+          if [[ -n "${PA_USERNAME}" && -n "${PA_TARGET_DIR}" && "${PA_TARGET_DIR}" != /home/${PA_USERNAME}/* ]]; then
+            errors+=("PA_TARGET_DIR devrait commencer par /home/${PA_USERNAME}/")
+          fi
+          if (( ${#errors[@]} )); then
+            for e in "${errors[@]}"; do echo "::error::$e"; done
+            echo "Réglages : Settings → Secrets and variables → Actions"
             exit 1
           fi
+          echo "Les 4 secrets sont présents et bien formés."
 
-      - name: Upload all files recursively (dirs auto-created by Files API)
+      # 2) Les secrets fonctionnent-ils vraiment ? (token, username, domaine, dossier source)
+      - name: Check PythonAnywhere credentials and web app config
         shell: bash
         run: |
           set -euo pipefail
-          USER="${{ secrets.PA_USERNAME }}"
-          TOKEN="${{ secrets.PA_TOKEN }}"
-          TARGET_DIR="${{ secrets.PA_TARGET_DIR }}"
-          DOMAIN="${{ secrets.PA_WEBAPP_DOMAIN }}"
+          HOST="${PA_HOST:-www.pythonanywhere.com}"
+          echo "PA_HOST=${HOST}" >> "$GITHUB_ENV"
+          code=$(curl -sS -o webapp.json -w "%{http_code}" \
+            -H "Authorization: Token ${PA_TOKEN}" \
+            "https://${HOST}/api/v0/user/${PA_USERNAME}/webapps/${PA_WEBAPP_DOMAIN}/")
+          case "$code" in
+            200) ;;
+            401|403) echo "::error::Token refusé (HTTP $code) : vérifier PA_TOKEN / PA_USERNAME, ou PA_HOST si le compte est sur eu.pythonanywhere.com"; exit 1 ;;
+            404) echo "::error::Web app ${PA_WEBAPP_DOMAIN} introuvable (HTTP 404) : créer la web app (onglet Web) ou corriger PA_WEBAPP_DOMAIN"; exit 1 ;;
+            *) echo "::error::Réponse inattendue de l'API PythonAnywhere (HTTP $code)"; exit 1 ;;
+          esac
+          python - <<'EOF'
+          import json, os, sys
+          cfg = json.load(open("webapp.json"))
+          src = (cfg.get("source_directory") or "").rstrip("/")
+          target = os.environ["PA_TARGET_DIR"].rstrip("/")
+          print(f"Web app : python {cfg.get('python_version')}, source_directory={src}")
+          if cfg.get("python_version") != "3.13":
+              print(f"::warning::La web app tourne en Python {cfg.get('python_version')} (3.13 attendu par l'atelier)")
+          if src and src != target:
+              print(f"::error::PA_TARGET_DIR ({target}) différent du 'Source code' de la web app ({src}) : "
+                    "le code serait déposé à un endroit que le site ne charge pas")
+              sys.exit(1)
+          EOF
+          rm -f webapp.json
 
-          # Optional: set PA_HOST secret to "eu.pythonanywhere.com" if your account is on EU.
-          HOST="${{ secrets.PA_HOST }}"
-          if [[ -z "${HOST}" ]]; then HOST="www.pythonanywhere.com"; fi
-
-          echo "Using PythonAnywhere host: ${HOST}"
-          echo "Target directory: ${TARGET_DIR}"
-
-          # Upload every file; remote directories are created automatically by the Files API.
-          while IFS= read -r -d '' file; do
-            rel="${file#./}"
-
-            # Exclusions (adjust to taste)
-            case "$rel" in
-              .git/*|.github/*|.venv/*|__pycache__/*|node_modules/*) continue ;;
-              *.pyc|.DS_Store) continue ;;
-            esac
-
-            remote_path="${TARGET_DIR}/${rel}"
-            echo " - ${rel} -> ${remote_path}"
-
-            curl -sS --fail -X POST \
-              -H "Authorization: Token ${TOKEN}" \
-              -F "content=@${file}" \
-              "https://${HOST}/api/v0/user/${USER}/files/path${remote_path}" \
+      # 3) Upload des seuls fichiers utiles en prod (l'API est limitée à 40 req/min)
+      - name: Upload runtime files
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${GITHUB_SHA}" > VERSION
+          # Code Python + templates versionnés, hors tests unitaires (nouveaux modules inclus automatiquement)
+          mapfile -t files < <(git ls-files -- '*.py' 'templates/*.html' requirements.txt ':(exclude)tests_unit/*')
+          files+=(VERSION)
+          echo "Target directory: ${PA_TARGET_DIR} (${#files[@]} fichiers)"
+          for rel in "${files[@]}"; do
+            echo " - ${rel}"
+            curl -sS --fail --retry 3 --retry-delay 5 -X POST \
+              -H "Authorization: Token ${PA_TOKEN}" \
+              -F "content=@${rel}" \
+              "https://${PA_HOST}/api/v0/user/${PA_USERNAME}/files/path${PA_TARGET_DIR}/${rel}" \
               >/dev/null
+          done
+          # runs.db n'est jamais envoyé : l'historique de prod est conservé.
 
-          done < <(
-            find . \
-              -type d \( -name .git -o -name .github -o -name .venv -o -name __pycache__ -o -name node_modules \) -prune -false \
-              -o -type f \
-                ! -name ".DS_Store" \
-                ! -name "*.pyc" \
-                -print0
-          )
-
-          echo "Reloading webapp ${DOMAIN}..."
-          curl -sS --fail -X POST \
-            -H "Authorization: Token ${TOKEN}" \
-            "https://${HOST}/api/v0/user/${USER}/webapps/${DOMAIN}/reload/" \
+      - name: Reload web app
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sS --fail --retry 3 --retry-delay 5 -X POST \
+            -H "Authorization: Token ${PA_TOKEN}" \
+            "https://${PA_HOST}/api/v0/user/${PA_USERNAME}/webapps/${PA_WEBAPP_DOMAIN}/reload/" \
             >/dev/null
+          echo "Reloaded ${PA_WEBAPP_DOMAIN}"
 
-          echo "Deployed. Try: https://${DOMAIN}/"
+      # 4) Smoke test de la prod : bonne version en ligne, pages OK, accès sortant vers l'API OK
+      - name: Smoke test production
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://${PA_WEBAPP_DOMAIN}"
+          version=""
+          for i in $(seq 1 12); do
+            version=$(curl -sS -m 15 "${BASE}/health" | python -c "import json,sys; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)
+            [[ "${version}" == "${GITHUB_SHA}" ]] && break
+            echo "Attente du rechargement (${i}/12)…"; sleep 5
+          done
+          if [[ "${version}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::/health ne renvoie pas la version déployée (${version:-aucune réponse}). Voir ${PA_WEBAPP_DOMAIN}.error.log"
+            exit 1
+          fi
+          for path in / /dashboard /api/runs; do
+            code=$(curl -sS -m 30 -o /dev/null -w "%{http_code}" "${BASE}${path}")
+            echo "GET ${path} -> ${code}"
+            [[ "${code}" == "200" ]] || { echo "::error::${path} renvoie HTTP ${code}"; exit 1; }
+          done
+          # Un run réel depuis la prod (201), ou 429 si un run récent existe déjà (anti-spam)
+          code=$(curl -sS -m 60 -o run.json -w "%{http_code}" -X POST "${BASE}/run?trigger=github-actions")
+          echo "POST /run -> ${code}"
+          if [[ "${code}" == "201" ]]; then
+            python - <<'EOF'
+          import json, sys
+          s = json.load(open("run.json"))["summary"]
+          print(f"Run prod : {s['status']} {s['passed']}/{s['total']} PASS, dispo {s['availability']:.0%}, "
+                f"p95 {s['latency_ms_p95']} ms, erreurs réseau {s['network_errors']}")
+          if s["network_errors"] == s["requests"]:
+              print("::error::Aucune requête sortante n'aboutit depuis PythonAnywhere (proxy / allowlist ?)")
+              sys.exit(1)
+          EOF
+          elif [[ "${code}" != "429" ]]; then
+            echo "::error::/run renvoie HTTP ${code}"; exit 1
+          fi
+          echo "Prod OK : ${BASE}/dashboard"

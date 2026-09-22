@@ -1,6 +1,5 @@
 import json
 import os
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -13,10 +12,34 @@ from tester.tests import API_NAME, TESTS
 
 app = Flask(__name__)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MIN_SECONDS_BETWEEN_RUNS = int(os.environ.get("MIN_SECONDS_BETWEEN_RUNS", 300))  # anti-spam : 1 run / 5 min
-STALE_AFTER_S = int(os.environ.get("STALE_AFTER_S", 26 * 3600))  # tâche quotidienne + marge
+# Planification principale = GitHub Actions toutes les 30 min : au-delà de 3 h sans run, on alerte.
+STALE_AFTER_S = int(os.environ.get("STALE_AFTER_S", 3 * 3600))
 TRIGGERS = {"http", "dashboard", "cron", "github-actions", "scheduled-task"}
-_run_lock = threading.Lock()
+PERIODS = {"24h": ("24 h", 86400), "7d": ("7 jours", 7 * 86400),
+           "30d": ("30 jours", 30 * 86400), "all": ("Tout", None)}
+DEFAULT_PERIOD = "7d"
+
+
+def _read_version():
+    """SHA du commit déployé, écrit dans VERSION par le workflow de déploiement."""
+    try:
+        with open(os.path.join(BASE_DIR, "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()[:40] or "dev"
+    except OSError:
+        return "dev"
+
+
+VERSION = _read_version()
+
+
+def period_arg():
+    key = request.args.get("period", DEFAULT_PERIOD)
+    if key not in PERIODS:
+        key = DEFAULT_PERIOD
+    seconds = PERIODS[key][1]
+    return key, (time.time() - seconds) if seconds else None
 
 
 # ------------------------------------------------------------- helpers Jinja
@@ -47,30 +70,83 @@ def template_helpers():
     def sec(value_ms):
         return "—" if value_ms is None else f"{value_ms / 1000:.1f} s".replace(".", ",")
 
-    return {"status_badge": status_badge, "pct": pct, "ms": ms, "sec": sec}
+    def ago(seconds):
+        if seconds is None:
+            return "—"
+        seconds = int(seconds)
+        if seconds < 60:
+            return f"{seconds} s"
+        if seconds < 3600:
+            return f"{seconds // 60} min"
+        if seconds < 86400:
+            return f"{seconds // 3600} h {seconds % 3600 // 60:02d}"
+        return f"{seconds // 86400} j"
+
+    return {"status_badge": status_badge, "pct": pct, "ms": ms, "sec": sec, "ago": ago}
 
 
+# ---------------------------------------------------------------- en-têtes
+@app.after_request
+def add_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path == "/run" or request.path.startswith("/api/") or request.path == "/health":
+        resp.headers["Cache-Control"] = "no-store"
+    elif request.path == "/dashboard":
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+# --------------------------------------------------------------------- run
 def execute_run(trigger):
     """Lance un run en respectant l'anti-spam. Renvoie (payload, code HTTP)."""
-    last = storage.get_last_run()
-    if last:
-        wait = MIN_SECONDS_BETWEEN_RUNS - (time.time() - last["created_at"])
-        if wait > 0:
-            return {"error": "rate_limited",
-                    "message": f"Un run a déjà eu lieu il y a moins de {MIN_SECONDS_BETWEEN_RUNS} s.",
-                    "retry_after_s": int(wait) + 1,
-                    "last_run_id": last["id"]}, 429
-    if not _run_lock.acquire(blocking=False):
-        return {"error": "run_in_progress", "message": "Un run est déjà en cours."}, 409
+    allowed, wait = storage.claim_run_slot(MIN_SECONDS_BETWEEN_RUNS)
+    if not allowed:
+        return {"error": "rate_limited",
+                "message": f"Un seul run toutes les {MIN_SECONDS_BETWEEN_RUNS // 60} min.",
+                "retry_after_s": int(wait) + 1}, 429
+    run = runner.run_all()
+    run["id"] = storage.save_run(run, trigger=trigger)
+    run["trigger"] = trigger
+    return run, 201
+
+
+def health_report():
+    """État de santé de la solution de monitoring (et non de l'API testée)."""
+    now = time.time()
+    checks = {}
     try:
-        run = runner.run_all()
-        run["id"] = storage.save_run(run, trigger=trigger)
-        run["trigger"] = trigger
-        return run, 201
-    finally:
-        _run_lock.release()
+        last = storage.get_last_run()
+        checks["database"] = {"ok": True, "runs": storage.count_runs()}
+    except Exception as e:
+        checks["database"] = {"ok": False, "error": str(e)}
+        return {"status": "down", "version": VERSION, "checks": checks}, 503
+
+    if last is None:
+        checks["last_run"] = {"ok": False, "message": "aucun run enregistré"}
+    else:
+        age = round(now - last["created_at"])
+        checks["last_run"] = {
+            "ok": age <= STALE_AFTER_S,
+            "id": last["id"],
+            "timestamp": last["timestamp"],
+            "trigger": last["trigger"],
+            "age_s": age,
+            "stale": age > STALE_AFTER_S,
+            "api_status": last["summary"]["status"],
+            "error_rate": last["summary"]["error_rate"],
+            "latency_ms_p95": last["summary"]["latency_ms_p95"],
+        }
+    status = "ok" if all(c["ok"] for c in checks.values()) else "degraded"
+    return {"status": status, "api": API_NAME, "version": VERSION, "tests": len(TESTS),
+            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "next_run_allowed_in_s": round(storage.seconds_until_next_run(MIN_SECONDS_BETWEEN_RUNS)),
+            "stale_after_s": STALE_AFTER_S,
+            "checks": checks}, 200
 
 
+# ------------------------------------------------------------------ routes
 @app.get("/")
 def consignes():
     return render_template("consignes.html")
@@ -89,25 +165,33 @@ def run():
 
 @app.get("/dashboard")
 def dashboard():
-    runs = storage.list_runs(limit=50)
+    period, since = period_arg()
+    runs = storage.list_runs(limit=50, since=since)
     run_id = request.args.get("run", type=int)
     selected = storage.get_run(run_id) if run_id else storage.get_last_run()
     if run_id and selected is None:
         abort(404)
+    last = storage.list_runs(limit=1)
     chart = [{"id": r["id"], "t": r["timestamp"], "avg": r["latency_ms_avg"],
               "p95": r["latency_ms_p95"], "err": r["error_rate"], "status": r["status"]}
              for r in reversed(runs)]
-    return render_template("dashboard.html", api=API_NAME, run=selected, runs=runs,
-                           chart=chart, is_latest=bool(runs) and selected is not None
-                           and selected["id"] == runs[0]["id"],
-                           tests_count=len(TESTS), min_interval=MIN_SECONDS_BETWEEN_RUNS)
+    health, _ = health_report()
+    return render_template(
+        "dashboard.html", api=API_NAME, run=selected, runs=runs, chart=chart,
+        is_latest=bool(last) and selected is not None and selected["id"] == last[0]["id"],
+        stats=storage.period_stats(since), period=period, periods=PERIODS,
+        health=health, version=VERSION, tests_count=len(TESTS),
+        min_interval=MIN_SECONDS_BETWEEN_RUNS,
+        next_run_in=round(storage.seconds_until_next_run(MIN_SECONDS_BETWEEN_RUNS)))
 
 
 @app.get("/api/runs")
 def api_runs():
     limit = min(request.args.get("limit", 50, type=int), 500)
-    runs = storage.list_runs(limit=limit)
-    return jsonify({"api": API_NAME, "count": len(runs), "runs": runs})
+    period, since = period_arg()
+    runs = storage.list_runs(limit=limit, since=since)
+    return jsonify({"api": API_NAME, "period": period, "count": len(runs),
+                    "stats": storage.period_stats(since), "runs": runs})
 
 
 @app.get("/api/runs/latest")
@@ -129,45 +213,28 @@ def api_run(run_id):
 @app.get("/export.json")
 def export_json():
     limit = min(request.args.get("limit", 500, type=int), 2000)
-    body = json.dumps({"api": API_NAME,
+    period, since = period_arg()
+    body = json.dumps({"api": API_NAME, "period": period, "version": VERSION,
                        "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                       "runs": storage.export_runs(limit=limit)},
+                       "stats": storage.period_stats(since),
+                       "runs": storage.export_runs(limit=limit, since=since)},
                       ensure_ascii=False, indent=2)
-    filename = f"runs_{API_NAME.lower()}_{datetime.now():%Y%m%d_%H%M}.json"
+    filename = f"runs_{API_NAME.lower()}_{period}_{datetime.now():%Y%m%d_%H%M}.json"
     return Response(body, mimetype="application/json",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/health")
 def health():
-    """État de santé de la solution de monitoring (et non de l'API testée)."""
-    now = time.time()
-    checks = {}
-    try:
-        last = storage.get_last_run()
-        checks["database"] = {"ok": True, "runs": storage.count_runs()}
-    except Exception as e:
-        checks["database"] = {"ok": False, "error": str(e)}
-        return jsonify({"status": "down", "checks": checks}), 503
+    payload, code = health_report()
+    return jsonify(payload), code
 
-    if last is None:
-        checks["last_run"] = {"ok": False, "message": "aucun run enregistré"}
-    else:
-        age = round(now - last["created_at"])
-        checks["last_run"] = {
-            "ok": age <= STALE_AFTER_S,
-            "id": last["id"],
-            "timestamp": last["timestamp"],
-            "age_s": age,
-            "stale": age > STALE_AFTER_S,
-            "api_status": last["summary"]["status"],
-            "error_rate": last["summary"]["error_rate"],
-            "latency_ms_p95": last["summary"]["latency_ms_p95"],
-        }
-    status = "ok" if all(c["ok"] for c in checks.values()) else "degraded"
-    return jsonify({"status": status, "api": API_NAME, "tests": len(TESTS),
-                    "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                    "checks": checks})
+
+@app.get("/robots.txt")
+def robots():
+    # évite que des robots d'indexation déclenchent /run ou parcourent l'API
+    return Response("User-agent: *\nDisallow: /run\nDisallow: /api/\nDisallow: /export.json\n",
+                    mimetype="text/plain")
 
 
 if __name__ == "__main__":

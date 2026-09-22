@@ -130,6 +130,31 @@
     .tip .r b{font-variant-numeric:tabular-nums}
     .tip .k{display:inline-block;width:12px;height:2px;border-radius:2px}
 
+    .health{margin:6px 0 0;color:var(--ink-2);font-size:13px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+    .health .badge{font-size:12px}
+    .health .warn{color:var(--warning-ink);font-weight:600}
+    .s-ok i{background:var(--good)} .s-ok{color:var(--good-ink)}
+    .s-degraded i{background:var(--warning);color:#3a2800} .s-degraded{color:var(--warning-ink)}
+    .s-down i{background:var(--critical)} .s-down{color:var(--critical-ink)}
+
+    .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+    .toolbar .label{color:var(--ink-2);font-size:13px;margin-right:2px}
+    .seg{display:inline-flex;flex-wrap:nowrap;max-width:100%;overflow-x:auto;border:1px solid var(--border);
+      border-radius:10px;background:var(--surface)}
+    .seg a{padding:6px 10px;color:var(--ink-2);font-size:13px;border-right:1px solid var(--border);white-space:nowrap}
+    .seg a:last-child{border-right:none}
+    .seg a:hover{background:var(--surface-2);text-decoration:none}
+    .seg a[aria-current="true"]{background:var(--surface-2);color:var(--ink);font-weight:600}
+    .toolbar .spacer{flex:1}
+    .btn.small{padding:6px 12px;font-size:13px;font-weight:500}
+    a.btn{display:inline-block}
+    a.btn:hover{text-decoration:none}
+    .pstats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}
+    @media (max-width:1000px){.pstats{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    @media (max-width:560px){.pstats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    .pstats .value{font-size:22px}
+    .section-title{font-size:13px;color:var(--ink-2);font-weight:600;margin:24px 0 0;text-transform:uppercase;letter-spacing:.04em}
+
     .empty{text-align:center;padding:48px 16px}
     .empty p{color:var(--ink-2)}
     footer{color:var(--muted);font-size:12px;padding:8px 0 40px}
@@ -142,8 +167,8 @@
     <nav>
       <a class="active" href="{{ url_for('dashboard') }}">Dashboard</a>
       <a href="{{ url_for('health') }}">/health</a>
-      <a href="{{ url_for('api_runs') }}">API JSON</a>
-      <a href="{{ url_for('export_json') }}">Export JSON</a>
+      <a href="{{ url_for('api_runs', period=period) }}">API JSON</a>
+      <a href="{{ url_for('export_json', period=period) }}">Export JSON</a>
       <a href="{{ url_for('consignes') }}">Consignes</a>
     </nav>
   </div>
@@ -162,10 +187,20 @@
       {% else %}
       <p class="sub">Aucun run enregistré pour l’instant.</p>
       {% endif %}
+      {% set lr = health.checks.last_run %}
+      <p class="health">
+        <a href="{{ url_for('health') }}" class="badge s-{{ health.status }}" title="Détail : /health">
+          <i aria-hidden="true">{{ '✓' if health.status == 'ok' else '!' }}</i>solution {{ health.status }}</a>
+        {% if lr.age_s is defined %}
+          <span>dernier run il y a {{ ago(lr.age_s) }}</span>
+          {% if lr.stale %}<span class="warn">· aucun run depuis plus de {{ ago(health.stale_after_s) }} : vérifier la planification</span>{% endif %}
+        {% endif %}
+        <span>· version <code>{{ version[:7] }}</code></span>
+      </p>
     </div>
     <div class="actions">
       <span class="run-msg" id="run-msg" role="status" aria-live="polite"></span>
-      <button class="btn" id="run-btn" type="button">Lancer un run</button>
+      <button class="btn" id="run-btn" type="button" data-wait="{{ next_run_in }}">Lancer un run</button>
     </div>
   </section>
 
@@ -244,9 +279,49 @@
     </div>
   </section>
 
+  <h2 class="section-title">Tendances et historique</h2>
+  <div class="toolbar">
+    <span class="label">Période</span>
+    <nav class="seg" aria-label="Période">
+      {% for key, (label, _) in periods.items() %}
+      <a href="{{ url_for('dashboard', period=key) }}" {% if key == period %}aria-current="true"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <span class="spacer"></span>
+    <a class="btn ghost small" href="{{ url_for('export_json', period=period) }}">Exporter la période (JSON)</a>
+  </div>
+
+  <section class="pstats" aria-label="Indicateurs sur la période">
+    <div class="kpi">
+      <div class="label">Runs sur la période</div>
+      <div class="value">{{ stats.runs }}</div>
+      <div class="hint">{{ periods[period][0] }}</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Runs UP</div>
+      <div class="value">{{ pct(stats.up_ratio, 0) }}</div>
+      <div class="hint">{{ stats.up or 0 }} sur {{ stats.runs }}</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Disponibilité moyenne</div>
+      <div class="value">{{ pct(stats.availability, 1) }}</div>
+      <div class="hint">requêtes avec réponse exploitable</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Taux d’erreur moyen</div>
+      <div class="value">{{ pct(stats.error_rate, 1) }}</div>
+      <div class="hint">tests FAIL + ERROR</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Latence p95 moyenne</div>
+      <div class="value">{{ ms(stats.latency_ms_p95) }}</div>
+      <div class="hint">pire run : {{ ms(stats.latency_ms_p95_max) }}</div>
+    </div>
+  </section>
+
   <section class="charts">
     <div class="card">
-      <h2>Latence par run <small>ms · {{ chart|length }} derniers runs</small></h2>
+      <h2>Latence par run <small>ms · {{ chart|length }} run(s) · {{ periods[period][0] }}</small></h2>
       <div class="legend">
         <span><b style="background:var(--series-1)"></b>moyenne</span>
         <span><b style="background:var(--series-2)"></b>p95</span>
@@ -265,7 +340,7 @@
   </section>
 
   <section class="card">
-    <h2>Historique <small>{{ runs|length }} derniers runs · cliquez une ligne pour le détail</small></h2>
+    <h2>Historique <small>{{ runs|length }} run(s) · {{ periods[period][0] }} · cliquez une ligne pour le détail</small></h2>
     <div class="table-wrap">
       <table>
         <thead><tr>
@@ -275,8 +350,8 @@
         </tr></thead>
         <tbody>
         {% for r in runs %}
-          <tr class="clickable {{ 'selected' if r.id == run.id }}" data-href="{{ url_for('dashboard', run=r.id) }}">
-            <td class="mono"><a href="{{ url_for('dashboard', run=r.id) }}">#{{ r.id }}</a></td>
+          <tr class="clickable {{ 'selected' if r.id == run.id }}" data-href="{{ url_for('dashboard', run=r.id, period=period) }}">
+            <td class="mono"><a href="{{ url_for('dashboard', run=r.id, period=period) }}">#{{ r.id }}</a></td>
             <td class="num" style="text-align:left">{{ r.timestamp|dt }}</td>
             <td>{{ status_badge(r.status) }}</td>
             <td class="num">{{ r.passed }}/{{ r.total }}</td>
@@ -287,6 +362,8 @@
             <td class="num">{{ sec(r.duration_ms) }}</td>
             <td class="cat">{{ r.trigger or '—' }}</td>
           </tr>
+        {% else %}
+          <tr><td colspan="10" class="cat">Aucun run sur cette période.</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -297,7 +374,9 @@
   <footer>
     Tests non destructifs (GET uniquement) · timeout 3 s · 1 retry max · backoff sur 429/5xx ·
     ≤ 20 requêtes/run · anti-spam : 1 run / {% if min_interval % 60 == 0 %}{{ min_interval // 60 }} min{% else %}{{ min_interval }} s{% endif %} ·
-    JSON : <a href="{{ url_for('api_last_run') }}">/api/runs/latest</a>
+    JSON : <a href="{{ url_for('api_last_run') }}">/api/runs/latest</a><br>
+    Données météo : <a href="https://open-meteo.com/" rel="noopener">Open-Meteo.com</a>, licence
+    <a href="https://creativecommons.org/licenses/by/4.0/" rel="noopener">CC BY 4.0</a>.
   </footer>
 </main>
 
@@ -306,15 +385,28 @@
   // ------------------------------------------------------------ bouton "Lancer un run"
   const btn = document.getElementById('run-btn');
   const msg = document.getElementById('run-msg');
+  // anti-spam : bouton désactivé avec compte à rebours tant que le créneau n'est pas libre
+  let timer;
+  const cooldown = seconds => {
+    clearInterval(timer);
+    let left = Math.ceil(seconds);
+    const tick = () => {
+      if (left <= 0) { clearInterval(timer); btn.disabled = false; btn.textContent = 'Lancer un run'; return; }
+      btn.disabled = true;
+      btn.textContent = `Prochain run dans ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+      left--;
+    };
+    tick(); timer = setInterval(tick, 1000);
+  };
+  if (+btn.dataset.wait > 0) cooldown(+btn.dataset.wait);
   btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Exécution…'; msg.textContent = '';
     try {
       const res = await fetch('{{ url_for("run", trigger="dashboard") }}', {method: 'POST'});
       const body = await res.json().catch(() => ({}));
-      if (res.status === 201) { location.href = '{{ url_for("dashboard") }}'; return; }
-      msg.textContent = res.status === 429
-        ? `Anti-spam : prochain run possible dans ${body.retry_after_s} s.`
-        : (body.message || `Erreur HTTP ${res.status}`);
+      if (res.status === 201) { location.href = '{{ url_for("dashboard", period=period) }}'; return; }
+      if (res.status === 429) { cooldown(body.retry_after_s || 60); return; }
+      msg.textContent = body.message || `Erreur HTTP ${res.status}`;
     } catch (e) {
       msg.textContent = 'Erreur réseau : ' + e.message;
     }
@@ -481,7 +573,7 @@
                 `Run #${d.id} · ${fmtDate(d.t)}`);
       });
       hit.addEventListener('pointerleave', () => { hit.setAttribute('fill', 'transparent'); tip.style.display = 'none'; });
-      hit.addEventListener('click', () => { location.href = '{{ url_for("dashboard") }}?run=' + d.id; });
+      hit.addEventListener('click', () => { location.href = '{{ url_for("dashboard", period=period) }}&run=' + d.id; });
       hit.style.cursor = 'pointer';
     });
   }

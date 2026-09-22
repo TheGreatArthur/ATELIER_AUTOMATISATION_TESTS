@@ -2,6 +2,8 @@
 # l'historique stocké sur PythonAnywhere.
 *.db
 *.db-journal
+# écrit par le workflow de déploiement (SHA du commit en prod)
+VERSION
 __pycache__/
 *.pyc
 .venv/

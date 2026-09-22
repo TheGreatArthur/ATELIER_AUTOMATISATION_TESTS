@@ -19,7 +19,7 @@ MAX_BACKOFF_S = 5.0                   # on n'attend jamais plus de 5 s
 DEFAULT_429_WAIT_S = 2.0              # attente si 429 sans en-tête Retry-After
 BASE_BACKOFF_S = 0.5                  # attente avant retry sur 5xx / timeout
 MAX_REQUESTS_PER_RUN = 20             # consigne : 20 requêtes max par run
-RUN_DEADLINE_S = 45.0                 # durée max d'un run (protège le worker Flask)
+RUN_DEADLINE_S = 25.0                 # durée max d'un run (1 seul worker web sur un compte gratuit)
 USER_AGENT = "atelier-api-monitoring/1.0 (tests non destructifs)"
 
 

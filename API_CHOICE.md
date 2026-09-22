@@ -9,7 +9,8 @@
   - https://open-meteo.com/en/docs
   - https://open-meteo.com/en/docs/geocoding-api
   - Fiche public-apis (catégorie Weather) : https://github.com/public-apis/public-apis#weather
-- Auth : **None** (pas de clé, usage non commercial gratuit)
+- Auth : **None** (pas de clé)
+- Licence / conditions : usage **non commercial** gratuit (un projet éducatif en fait partie), données sous **CC BY 4.0** → attribution « Open-Meteo.com » affichée en pied de dashboard ([conditions](https://open-meteo.com/en/terms)).
 - Pourquoi ce choix : sans clé, contrat JSON stable et documenté, vraies réponses d'erreur (400 + `reason`),
   et domaines présents dans la **whitelist PythonAnywhere** des comptes gratuits
   (`api.open-meteo.com`, `geocoding-api.open-meteo.com`).
@@ -44,9 +45,9 @@
 
 ## Limites / rate limiting connu
 
-- Gratuit en usage non commercial : **10 000 appels/jour, 5 000/heure, 600/minute**.
+- Gratuit en usage non commercial : **600 appels/minute, 5 000/heure, moins de 10 000/jour** (≈ 300 000/mois), d'après les conditions d'utilisation (vérifié le 22/09/2026).
 - Notre charge : **12 requêtes par run** (+ 1 retry max par requête, plafond dur de 20/run),
-  anti-spam de 5 minutes entre deux runs → très loin des quotas.
+  anti-spam de 5 minutes entre deux runs, run planifié toutes les 30 min → environ 600 requêtes/jour, très loin des quotas.
 - En cas de dépassement l'API renvoie **429** : le client attend (`Retry-After`, plafonné à 5 s) puis fait 1 seul retry.
 
 ## Risques (instabilité, downtime, CORS, etc.)
@@ -56,6 +57,6 @@
   la présence de `error: true` et d'un `reason` non vide (+ le mot « latitude » pour le test 5).
 - Latence variable selon le réseau (proxy PythonAnywhere sur les comptes gratuits) :
   seuil QoS volontairement large (p95 < 1000 ms), timeout client de 3 s.
-- Dépendance à la whitelist PythonAnywhere : si le domaine en sortait, tous les tests passeraient
-  en ERROR (erreur réseau), ce que le dashboard et `/health` rendent visible.
+- Dépendance à l'allowlist PythonAnywhere (comptes gratuits) : si le domaine en sortait, tous les tests passeraient
+  en ERROR (erreur réseau) ; le smoke test du déploiement le détecte (« Aucune requête sortante n'aboutit »).
 - CORS : sans objet, les appels sont faits côté serveur (Python), pas depuis le navigateur.
