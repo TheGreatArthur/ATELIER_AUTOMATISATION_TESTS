@@ -46,7 +46,7 @@
 
 - Gratuit en usage non commercial : **10 000 appels/jour, 5 000/heure, 600/minute**.
 - Notre charge : **12 requêtes par run** (+ 1 retry max par requête, plafond dur de 20/run),
-  anti-spam de 60 s entre deux runs → très loin des quotas.
+  anti-spam de 5 minutes entre deux runs → très loin des quotas.
 - En cas de dépassement l'API renvoie **429** : le client attend (`Retry-After`, plafonné à 5 s) puis fait 1 seul retry.
 
 ## Risques (instabilité, downtime, CORS, etc.)

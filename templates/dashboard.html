@@ -296,7 +296,7 @@
 
   <footer>
     Tests non destructifs (GET uniquement) · timeout 3 s · 1 retry max · backoff sur 429/5xx ·
-    ≤ 20 requêtes/run · anti-spam : 1 run / {{ min_interval }} s ·
+    ≤ 20 requêtes/run · anti-spam : 1 run / {% if min_interval % 60 == 0 %}{{ min_interval // 60 }} min{% else %}{{ min_interval }} s{% endif %} ·
     JSON : <a href="{{ url_for('api_last_run') }}">/api/runs/latest</a>
   </footer>
 </main>

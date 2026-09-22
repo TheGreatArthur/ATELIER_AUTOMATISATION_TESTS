@@ -85,7 +85,7 @@ API testée : **[Open-Meteo](https://open-meteo.com/)** (sans clé, présente da
 | Route | Rôle |
 |-------|------|
 | `/` | Consignes de l'atelier |
-| `/run` (GET/POST) | Lance un run de tests, l'enregistre en SQLite et renvoie le JSON (201). Anti-spam : 429 + `Retry-After` si un run a eu lieu il y a moins de 60 s |
+| `/run` (GET/POST) | Lance un run de tests, l'enregistre en SQLite et renvoie le JSON (201). Anti-spam : 429 + `Retry-After` si un run a eu lieu il y a moins de 5 minutes |
 | `/dashboard` | Dernier run (statut, KPIs, interprétation, détail des tests), tendances latence / taux d'erreur, historique cliquable (`?run=<id>`) |
 | `/health` | Santé de la solution : base SQLite joignable, âge et statut du dernier run (503 si la base est KO) |
 | `/api/runs`, `/api/runs/latest`, `/api/runs/<id>` | Historique et runs au format JSON |

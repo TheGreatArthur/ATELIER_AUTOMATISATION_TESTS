@@ -27,12 +27,21 @@ jobs:
 
       - name: Validate required secrets
         shell: bash
+        env:
+          PA_USERNAME: ${{ secrets.PA_USERNAME }}
+          PA_TOKEN: ${{ secrets.PA_TOKEN }}
+          PA_TARGET_DIR: ${{ secrets.PA_TARGET_DIR }}
+          PA_WEBAPP_DOMAIN: ${{ secrets.PA_WEBAPP_DOMAIN }}
         run: |
           set -euo pipefail
-          : "${{ secrets.PA_USERNAME }}"
-          : "${{ secrets.PA_TOKEN }}"
-          : "${{ secrets.PA_TARGET_DIR }}"
-          : "${{ secrets.PA_WEBAPP_DOMAIN }}"
+          missing=()
+          for name in PA_USERNAME PA_TOKEN PA_TARGET_DIR PA_WEBAPP_DOMAIN; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::Secrets manquants : ${missing[*]} (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
 
       - name: Upload all files recursively (dirs auto-created by Files API)
         shell: bash

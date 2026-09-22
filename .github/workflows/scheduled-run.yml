@@ -2,7 +2,7 @@ name: Scheduled API test run
 
 # Planification complémentaire à la "Scheduled Task" PythonAnywhere
 # (limitée à 1 exécution/jour sur un compte gratuit) : GitHub appelle /run
-# toutes les 30 minutes. L'anti-spam de l'app (1 run / 60 s) reste actif.
+# toutes les 30 minutes. L'anti-spam de l'app (1 run / 5 min) reste actif.
 on:
   schedule:
     - cron: "*/30 * * * *"

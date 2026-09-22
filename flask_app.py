@@ -13,7 +13,7 @@ from tester.tests import API_NAME, TESTS
 
 app = Flask(__name__)
 
-MIN_SECONDS_BETWEEN_RUNS = int(os.environ.get("MIN_SECONDS_BETWEEN_RUNS", 60))  # anti-spam
+MIN_SECONDS_BETWEEN_RUNS = int(os.environ.get("MIN_SECONDS_BETWEEN_RUNS", 300))  # anti-spam : 1 run / 5 min
 STALE_AFTER_S = int(os.environ.get("STALE_AFTER_S", 26 * 3600))  # tâche quotidienne + marge
 TRIGGERS = {"http", "dashboard", "cron", "github-actions", "scheduled-task"}
 _run_lock = threading.Lock()
